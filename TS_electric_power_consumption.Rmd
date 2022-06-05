@@ -1,0 +1,227 @@
+---
+title: "Final Project"
+author: "Suzet Nkwaya"
+date: "05/12/2022"
+output: pdf_document
+header-include: \usepackage{setspace}\doublespacing
+fontsize: 12pt
+geometry: margin=1in
+---
+
+```{r, echo=FALSE}
+library(TSstudio)
+rm(list=ls())
+```
+
+### Data Set Information:
+
+The dataset is an archive that contains power consumption measurements gathered in a house located outside Paris, France between December 2006 and November 2010 (47 months).
+The dataset contains some missing values in the measurements (nearly 1,25% of the rows). All calendar time stamps are present but for some timestamps, the measurement values are missing. To fix this i imputed the missing values with the value that came right before. I believe this is an acceptable strategy because the measurements are collected every minute, and my assumption is that power consumption may vary on an monthly, hourly or daily basis and not from one minute to the next.
+
+I am interested in seeing how power consumption changes throughout the day, and throughout the year. For the modeling part of the project I aggregated monthly data. Although it would have been interesting to look at hourly data, aggregation had the effect or reducing the size of the dataset and thus made computations much faster.
+
+Some of the variables in the dataset are:
+* Date in format dd/mm/yyyy,time in format hh:mm:ss 
+* global_active_power: household global minute-averaged active power (in kilowatt) 
+* global_reactive_power: household global minute-averaged reactive power (in kilowatt) 
+* voltage: minute-averaged voltage (in volt) 
+* global_intensity: household global minute-averaged current intensity (in ampere) 
+I the following analysis focus on **global_active_power**
+
+Dataset Location: [Individual household electric power consumption] (https://archive.ics.uci.edu/ml/datasets/ElectricityLoadDiagrams20112014#)
+
+
+```{r, echo=FALSE,include=FALSE}
+library(tseries)
+library(forecast)
+library(lubridate)
+library(zoo)
+powerCons<-read.table(file="../Project/household_power_consumption.txt", sep=";",header = TRUE)
+# make all column names lower caser for easy manipulation
+names(powerCons) <- tolower(names(powerCons))
+#powerCons$date <- as.Date(powerCons$date, format = "%d/%m/%Y")
+
+```
+
+### Exploratory analysis
+
+```{r, echo=FALSE}
+head(powerCons[,1:3])
+#find missing values
+print(paste("There are ",sum(is.na(powerCons))," missing data points"))
+```
+
+```{r, echo=FALSE,include=FALSE}
+#replace missing values by most recent value
+miss.val <- powerCons == "?"
+is.na(powerCons)[miss.val] <- TRUE
+powerCons <- na.locf(powerCons, fromLast = FALSE)
+
+print(paste("There are ",sum(is.na(powerCons))," missing data points"))
+```
+
+```{r, echo=FALSE,include=FALSE}
+#transform some column numeric
+powerCons[,3:9] <- sapply(powerCons[,3:9],as.numeric)
+```
+
+
+```{r, echo=FALSE,include=FALSE}
+powerCons$date <- as.Date(powerCons$date, format = "%d/%m/%Y")
+#I am interested only in the global active power
+subpwr<-powerCons[,1:3]
+print(paste("There are ",sum(is.na(subpwr))," missing data points"))
+
+```
+```{r echo= FALSE, include= FALSE, warning = FALSE}
+#Only look at data between Sep 2009 and Aug 2010
+#subpwr <- subset(powerCons, date >= "2008-09-01" & date <= "2010-08-31")
+```
+
+
+```{r, echo=FALSE, warning=FALSE}
+#add a new column to the data set which contains both the “Date” and “Time” 
+subpwr$datetime <- paste(subpwr$date,subpwr$time)
+subpwr$datetime <-as.POSIXct(subpwr$datetime,"%Y/%m/%d %H/%M/%S")
+subpwr$date <- date(subpwr$datetime)
+subpwr$year <- year(subpwr$datetime)
+subpwr$week <- week(subpwr$datetime)
+subpwr$day <- day(subpwr$datetime)
+subpwr$month <- month(subpwr$datetime)
+subpwr$hour <- hour(subpwr$datetime)
+subpwr$minute <- minute(subpwr$datetime)
+
+```
+
+Here is the data after it was aggregated by year and month
+
+```{r, echo=FALSE}
+#the original data is collected every few minutes
+#we'll transform it to be hourly
+
+monthlydt <-aggregate(global_active_power~month+year,
+                      subpwr,
+                      FUN=sum)
+head(monthlydt)
+```
+
+
+```{r, echo=FALSE}
+par(mfrow=c(1,1))
+tsmonth <-ts(monthlydt[3],frequency=12,start=c(2006,12), end=c(2010,11))
+```
+
+Next  I decomposed the data into seasonal, trend and irregular components. And as i expected we can see a seasonal trend. This makes sense because more energy is used as the weather changes throughout the year. 
+
+```{r, echo=FALSE}
+comp.tsmonth <-decompose(tsmonth)
+plot(comp.tsmonth)
+```
+The data looks stationary, but we can look at the ACF and perform a Dickey-Fuller test to confirm 
+
+```{r, echo=FALSE}
+par(mfrow=c(1,2))
+#acf(monthlydt$global_active_power, main="ACF Plot",length(tsmonth))
+#pacf(monthlydt$global_active_power,main="PACF Plot",length(tsmonth))
+Acf(tsmonth,lag.max = length(tsmonth))
+Pacf(tsmonth,lag.max = length(tsmonth))
+#Augmented Dickey-Fuller Test
+adf.test(monthlydt$global_active_power)
+```
+looking at the ACF plot, it shows evidence of seasonality in power consumption because measurements  that are 12 months apart tend to be strongly correlated. Additionally the Augmented Dickey-Fuller Test gave a pvalue that is less than 0.05, therefore we need to we reject the null hypothesis and conclude that the series is stationary
+
+## Modeling
+
+### Analysis using ARIMA
+```{r, echo=FALSE}
+set.seed(2022)
+par(mfrow=c(1,1))
+testsize=round(length(tsmonth)*0.1) # use 10% for testing
+splitdata <- ts_split(ts.obj = tsmonth, sample.out = testsize)
+training <- splitdata$train
+testing <- splitdata$test
+model.arima <- auto.arima(training, ic="aic",
+                          seasonal=T,
+                          allowmean=F,
+                          allowdrift=F)
+# Forecasting 5 months with test dataset.
+arima.forecast <- forecast(model.arima,level = 95,
+                           h=testsize)
+plot(arima.forecast, type="o",ylab="Global Active Power",xlab="Date", main="Frorecasts from ARIMA(0,1,1)(1,1,0)")
+lines(tsmonth)
+lines(arima.forecast$lower,col="red",lty=2)
+lines(arima.forecast$upper,col="red",lty=2)
+legend("bottomleft",col = c("black","skyblue", "red"), 
+       lty = c(1, 1,2),
+       legend = c("Original data","Forecasts","95% Interval for Forecasts"))
+
+```
+
+Using the auto arima function I got my best model to be ARMIMA(0,1,1)(1,1,1). This is a moving average model with 1 seasonal difference component, and 1 seasonal moving average
+
+```{r, echo=FALSE}
+acc <- accuracy(arima.forecast,testing)
+acc[,c(1,2,4,5,7)]
+#checkresiduals(arima.forecast)
+
+```
+The ARIMA model produced decent predictions judging by the accuracy metrics below and the plot above. It is important to note that the prediction interval would get wider as we try to predict values that are further in the future
+
+### Analysis using State space model
+```{r, echo=FALSE,include=FALSE}
+monthlydt2<-monthlydt
+monthlydt2$fdate<-as.yearmon(paste(monthlydt2$year, monthlydt2$month), "%Y %m")
+```
+
+```{r echo=FALSE,include=FALSE}
+library(MARSS)
+set.seed(2022) 
+y <-monthlydt2$global_active_power
+n <- length(y)
+
+sub.keep <- 1:43
+sub.pred <- 44:length(y)
+
+# Set the last 25 values to NA if you want to predict them
+y.marss <- y
+y.marss[sub.pred] <- NA
+
+```
+
+
+```{r echo=FALSE, warning=FALSE}
+model <- list(
+  B=array(1, dim = c(1, 1, n)), U=matrix(0), Q=matrix("sig.sq.w"),
+  Z=array(1, dim = c(1, 1, n)), A=matrix(0), R=matrix("sig.sq.v"),
+  x0=matrix("mu"), tinitx=1 )
+
+# Use EM to get starting values for direct maximization
+#fit <- MARSS(c(y.marss), model=model, method = "kem") 
+# Direct maximization starting at EM starting values
+fit <- MARSS(c(y.marss), model = model, method = "BFGS",silent=FALSE)
+
+```
+```{r, echo=FALSE,warning=FALSE}
+forc <- fit$ytT # E[y_t | y_1,...,y_m]
+forc.se <- fit$ytT.se
+
+#plot(tsmonth,col = "gray")
+plot(monthlydt2$fdate,monthlydt2$global_active_power, type="l",xlab="Date",ylab="Global active Power",main="State Space model Predictions")
+
+lines(monthlydt2$fdate[sub.pred],forc[sub.pred], col = "blue",type="l")
+
+lines(monthlydt2$fdate[sub.pred],forc[sub.pred] +
+      forc.se[sub.pred]*qnorm(0.025), 
+     col = "blue",
+      lty = 2,type="l")
+
+lines(monthlydt2$fdate[sub.pred],forc[sub.pred]+
+      forc.se[sub.pred]*qnorm(0.975),
+      col = "blue",
+      lty = 2,type="l")
+```
+```{r, echo=FALSE,warning=FALSE,include=FALSE}
+print(paste("The AIC for the ARIMA model is ",round(model.arima$aic)," and for the State Space model the AIC is ", round(fit$AIC)))
+```
+
+The State space model did not do a good job a predicting future power consumption. The AIC for the ARIMA model is  641  and for the State Space model the AIC is  1069. Therefore I would chose the ARIMA model. Because the  number of observations is large enough the AIC and AICc become similar because AICc converges to AIC, so used AIC
